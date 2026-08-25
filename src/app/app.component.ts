@@ -1,4 +1,6 @@
+import { HtmlCleanerService } from './../html-cleaner.service';
 import { Component } from '@angular/core';
+import { DomSanitizer } from '@angular/platform-browser';
 import { AngularEditorConfig } from '@local/angular-editor';
 
 @Component({
@@ -7,6 +9,7 @@ import { AngularEditorConfig } from '@local/angular-editor';
   styleUrl: './app.component.scss'
 })
 export class AppComponent {
+  constructor(private htmlCleanerService: HtmlCleanerService) {}
   htmlContent = '<p>Angular Editor v1.1.4 local source</p>';
 
   editorConfig: AngularEditorConfig = {
@@ -38,4 +41,12 @@ export class AppComponent {
       ]
     ]
   };
+
+  onSubmit() {
+    console.log("this.htmlContent: ", this.htmlContent)
+
+    const htmlCleaner = this.htmlCleanerService.sanitize(JSON.parse(JSON.stringify(this.htmlContent)));
+    console.log("this.htmlContent: ", htmlCleaner)
+  }
+
 }
