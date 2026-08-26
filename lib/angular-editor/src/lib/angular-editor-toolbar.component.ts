@@ -236,6 +236,22 @@ export class AngularEditorToolbarComponent {
       }
     });
 
+    // Safe indentation uses margin-left instead of BLOCKQUOTE, so reflect that
+    // state on the toolbar as well.
+    const cssIndented = nodes.some(node => {
+      if (!(node instanceof HTMLElement)) {
+        return false;
+      }
+      const match = /^(\d+(?:\.\d+)?)px$/i.exec(node.style.marginLeft || '');
+      return !!match && Number(match[1]) > 0;
+    });
+    if (cssIndented) {
+      const indentButton = this.doc.getElementById('indent-' + this.id);
+      if (indentButton) {
+        this.r.addClass(indentButton, 'active');
+      }
+    }
+
     this.foreColour = this.doc.queryCommandValue('ForeColor');
     this.fontSize = this.doc.queryCommandValue('FontSize');
     this.fontName = this.doc.queryCommandValue('FontName').replace(/"/g, '');

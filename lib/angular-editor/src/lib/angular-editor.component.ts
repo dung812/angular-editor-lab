@@ -24,6 +24,10 @@ import {AngularEditorService} from './angular-editor.service';
 import {DOCUMENT} from '@angular/common';
 import {DomSanitizer} from '@angular/platform-browser';
 import {isDefined} from './utils';
+import {
+  encodeSafeIndentationForSanitizer,
+  restoreSafeIndentationAfterSanitizer,
+} from './safe-indentation';
 
 @Component({
   selector: 'angular-editor',
@@ -107,8 +111,9 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   /**
    * Executed command from editor header buttons
    * @param command string from triggerCommand
+   * @param value optional value passed through to AngularEditorService
    */
-  executeCommand(command: string) {
+  executeCommand(command: string, value?: string) {
     this.focus();
     if (command === 'focus') {
       return;
@@ -123,7 +128,20 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
         this.editorService.removeSelectedElements('h1,h2,h3,h4,h5,h6,p,pre');
         this.onContentChange(this.textArea.nativeElement);
       } else {
-        this.editorService.executeCommand(command);
+        let handledBySafeIndentation = false;
+        if (command === 'indent' || command === 'outdent') {
+          handledBySafeIndentation =
+            this.editorService.executeSafeIndentationCommand(
+              command,
+              this.textArea.nativeElement,
+            );
+        }
+
+        if (handledBySafeIndentation) {
+          this.onContentChange(this.textArea.nativeElement);
+        } else {
+          this.editorService.executeCommand(command, value);
+        }
       }
       this.exec();
     }
@@ -204,8 +222,19 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
       html = '';
     }
     if (typeof this.onChange === 'function') {
-      this.onChange(this.config.sanitize || this.config.sanitize === undefined ?
-        this.sanitizer.sanitize(SecurityContext.HTML, html) : html);
+      let changedHtml = html;
+      if (this.config.sanitize || this.config.sanitize === undefined) {
+        const encodedHtml = encodeSafeIndentationForSanitizer(html, this.doc);
+        const sanitizedHtml = this.sanitizer.sanitize(
+          SecurityContext.HTML,
+          encodedHtml,
+        ) || '';
+        changedHtml = restoreSafeIndentationAfterSanitizer(
+          sanitizedHtml,
+          this.doc,
+        );
+      }
+      this.onChange(changedHtml);
       if ((!html) !== this.showPlaceholder) {
         this.togglePlaceholder(this.showPlaceholder);
       }

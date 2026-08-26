@@ -3,6 +3,7 @@ import {HttpClient, HttpEvent} from '@angular/common/http';
 import {Observable} from 'rxjs';
 import {DOCUMENT} from '@angular/common';
 import {CustomClass} from './config';
+import {applySafeIndentation, SafeIndentationCommand} from './safe-indentation';
 
 export interface UploadResponse {
   imageUrl: string;
@@ -24,14 +25,29 @@ export class AngularEditorService {
   /**
    * Executed command from editor header buttons exclude toggleEditorMode
    * @param command string from triggerCommand
+   * @param value optional value passed to document.execCommand
    */
-  executeCommand(command: string) {
+  executeCommand(command: string, value?: string) {
     const commands = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'pre'];
     if (commands.includes(command)) {
       this.doc.execCommand('formatBlock', false, command);
       return;
     }
-    this.doc.execCommand(command, false, null);
+    this.doc.execCommand(command, false, value);
+  }
+
+  /**
+   * Executes PDF-safe indentation without changing the existing
+   * executeCommand(command, value?) contract.
+   *
+   * @returns true when safe indentation handled the selection; false allows
+   * the component to fall back to the original command behavior (for lists).
+   */
+  executeSafeIndentationCommand(
+    command: SafeIndentationCommand,
+    editorRoot: HTMLElement,
+  ): boolean {
+    return applySafeIndentation(this.doc, editorRoot, command);
   }
 
   /**

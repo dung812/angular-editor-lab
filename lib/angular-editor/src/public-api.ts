@@ -3,3 +3,4 @@ export * from './lib/angular-editor.component';
 export * from './lib/angular-editor-toolbar.component';
 export * from './lib/angular-editor.module';
 export * from './lib/config';
+export * from './lib/safe-indentation';

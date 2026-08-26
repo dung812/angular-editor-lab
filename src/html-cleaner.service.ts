@@ -62,6 +62,15 @@ export class HtmlCleanerService {
           'text-align': [/^left$/i, /^right$/i, /^center$/i],
           'font-weight': [/^bold$/i],
           'font-style': [/^italic$/i],
+          // Canonical indentation emitted by the patched editor and cleaner.
+          'margin-left': [/^(?:0|[1-9]\d{0,3}(?:\.\d+)?)px$/i],
+        },
+        blockquote: {
+          // Legacy Chrome execCommand('indent') output. These declarations
+          // are only retained long enough to convert the blockquote below.
+          'margin': [/^0(?:px)?\s+0(?:px)?\s+0(?:px)?\s+(?:0|[1-9]\d{0,3}(?:\.\d+)?)px$/i],
+          'border': [/^none$/i],
+          'padding': [/^0(?:px)?$/i],
         },
       },
       selfClosing: [
@@ -91,7 +100,7 @@ export class HtmlCleanerService {
     this.foldDanglingWrapperListsKeepWrapper(doc); // Fold single-shell wrapper lists (keep wrapper type)
     this.mergeEmptyListItemsIntoPrevious(doc); // Merge empty <li> that only contain sublists into previous
     this.hoistSublistsOutOfLiForIText(doc); // Hoist sublists out of <li> for iText5 compatibility
-    this.convertBlockquoteSpanToDivs(doc); // Step 5. Convert nested blockquotes (with spans/text) into flat <div> blocks. This is what produces: <div>abc</div><div>xyz</div> from your input
+    this.convertBlockquoteIndentationToDivs(doc); // Step 5. Preserve indent while removing iText5-hostile blockquotes/deep wrappers
 
     // Step 6. Hygiene cleanup
     this.removeEmptyTags(doc);
@@ -160,162 +169,143 @@ export class HtmlCleanerService {
   }
 
   /**
-   * Convert blockquotes to divs.
-   * - If a blockquote contains nested blockquotes: flatten each leaf <blockquote> into its own <div> (preserving order).
-   * - If a blockquote has NO nested blockquotes: simply rename the blockquote to <div> and keep its children intact.
+   * Convert legacy editor indentation into an iText5-safe representation.
+   *
+   * Chrome's execCommand('indent') uses a blockquote and adds one nested div
+   * for every additional level. XML Worker in iText 5 is fragile with that
+   * structure. The canonical output is one flat div with margin-left.
    */
-  private convertBlockquoteSpanToDivs(doc: Document): void {
-    const hasInnerBlockquote = (el: Element): boolean =>
-      !!el.querySelector('blockquote');
-
-    const isWhitespace = (n: Node): boolean =>
-      n.nodeType === 3 &&
-      (n.nodeValue || '').replace(/\u00A0/g, ' ').trim().length === 0;
-
-    const textOf = (el: Element): string =>
-      (el.textContent || '').replace(/\s+/g, ' ').trim();
-
-    // Normalize a node to a block-level <div> (preserving structure for lists)
-    const normalizeToBlockDiv = (node: Node): HTMLElement | Element | null => {
-      if (node.nodeType === 3) {
-        const t = (node.nodeValue || '').replace(/\u00A0/g, ' ').trim();
-        if (!t) return null;
-        const div = doc.createElement('div');
-        div.textContent = t;
-        return div;
-      }
-      if (node.nodeType !== 1) return null;
-
-      const el = node as HTMLElement;
-      const tag = el.tagName.toLowerCase();
-
-      if (tag === 'br') return null;
-
-      if (tag === 'span') {
-        const t = textOf(el);
-        if (!t) return null;
-        const div = doc.createElement('div');
-        div.textContent = t;
-        return div;
-      }
-
-      if (tag === 'div') {
-        if (
-          el.children.length === 1 &&
-          el.firstElementChild!.tagName.toLowerCase() === 'div'
-        ) {
-          return el.firstElementChild as HTMLElement;
-        }
-        return el;
-      }
-
-      // Preserve lists as elements (do not flatten to text)
-      if (tag === 'ul' || tag === 'ol') {
-        return el;
-      }
-
-      if (tag === 'p') {
-        const t = textOf(el);
-        if (!t) return null;
-        const div = doc.createElement('div');
-        div.textContent = t;
-        return div;
-      }
-
-      // Default: wrap any other element with non-empty text into <div>
-      const t = textOf(el);
-      if (!t) return null;
-      const div = doc.createElement('div');
-      div.textContent = t;
-      return div;
-    };
-
-    // Return leaf <blockquote> elements (those without nested <blockquote>) under a root
-    const listLeafBlockquotes = (rootBQ: HTMLElement): HTMLElement[] => {
-      // Include root if it is itself a leaf
-      if (!hasInnerBlockquote(rootBQ)) return [rootBQ];
-
-      const desc = Array.prototype.slice.call(
-        rootBQ.querySelectorAll('blockquote'),
-      ) as HTMLElement[];
-      const out: HTMLElement[] = [];
-      for (let i = 0; i < desc.length; i++) {
-        if (!hasInnerBlockquote(desc[i])) out.push(desc[i]);
-      }
-      return out;
-    };
-
-    // Snapshot all blockquotes and find top-level ones
-    const allBqs = Array.prototype.slice.call(
+  private convertBlockquoteIndentationToDivs(doc: Document): void {
+    const blockquotes = Array.prototype.slice.call(
       doc.querySelectorAll('blockquote'),
     ) as HTMLElement[];
-    if (allBqs.length === 0) return;
 
-    const topLevel: HTMLElement[] = [];
-    for (let i = 0; i < allBqs.length; i++) {
-      const bq = allBqs[i];
-      let p: HTMLElement | null = bq.parentElement;
-      let hasBQAncestor = false;
-      while (p) {
-        if (p.tagName && p.tagName.toLowerCase() === 'blockquote') {
-          hasBQAncestor = true;
-          break;
-        }
-        p = p.parentElement;
+    // Deepest first lets an outer quote absorb an already-normalized inner
+    // indentation without leaving nested blockquote tags behind.
+    for (let i = blockquotes.length - 1; i >= 0; i--) {
+      const blockquote = blockquotes[i];
+      if (!blockquote.parentNode) continue;
+
+      const chain = this.getSingleDivChain(blockquote);
+      const containsNormalizedChild = chain.some((item) =>
+        item.getAttribute('data-ae-normalized-indent') === 'true',
+      );
+
+      let indentPx = this.readIndentPx(blockquote);
+      if (indentPx <= 0) indentPx = 40;
+
+      let explicitChildIndent = 0;
+      for (let c = 0; c < chain.length; c++) {
+        explicitChildIndent += this.readIndentPx(chain[c]);
       }
-      if (!hasBQAncestor) topLevel.push(bq);
+      indentPx += explicitChildIndent;
+
+      // In legacy editor output the first div belongs to the first indent
+      // level; every additional wrapper div represents another 40px level.
+      // Do not infer wrapper levels when the chain contains a normalized
+      // nested blockquote because its explicit margin already represents it.
+      if (!containsNormalizedChild && chain.length > 1) {
+        indentPx += (chain.length - 1) * 40;
+      }
+
+      const replacement = doc.createElement('div');
+      const styleSources: HTMLElement[] = [blockquote].concat(chain);
+      this.copyPresentationStyles(styleSources, replacement);
+      replacement.style.marginLeft = Math.min(indentPx, 2000) + 'px';
+      replacement.setAttribute('data-ae-normalized-indent', 'true');
+
+      const contentSource = chain.length > 0
+        ? chain[chain.length - 1]
+        : blockquote;
+      while (contentSource.firstChild) {
+        replacement.appendChild(contentSource.firstChild);
+      }
+
+      blockquote.parentNode.replaceChild(replacement, blockquote);
     }
 
-    for (let t = 0; t < topLevel.length; t++) {
-      const root = topLevel[t];
+    const normalized = doc.querySelectorAll('[data-ae-normalized-indent]');
+    for (let i = 0; i < normalized.length; i++) {
+      normalized[i].removeAttribute('data-ae-normalized-indent');
+    }
+  }
 
-      if (!hasInnerBlockquote(root)) {
-        // Simple rename: <blockquote> -> <div>, keep children intact
-        const div = doc.createElement('div');
-        while (root.firstChild) div.appendChild(root.firstChild);
-        if (root.parentNode) root.parentNode.replaceChild(div, root);
-        continue;
-      }
+  /** Return a chain where each container has exactly one meaningful div child. */
+  private getSingleDivChain(container: HTMLElement): HTMLElement[] {
+    const chain: HTMLElement[] = [];
+    let current = container;
 
-      // Case: contains nested blockquotes
-      const wrapper = doc.createElement('div');
-      const children = Array.prototype.slice.call(root.childNodes) as Node[];
+    while (current) {
+      let onlyDiv: HTMLElement | null = null;
+      let canCollapse = true;
 
-      for (let i = 0; i < children.length; i++) {
-        const ch = children[i];
-        if (isWhitespace(ch)) continue;
-
-        if (
-          ch.nodeType === 1 &&
-          (ch as Element).tagName.toLowerCase() === 'blockquote'
-        ) {
-          const chEl = ch as HTMLElement;
-
-          if (!hasInnerBlockquote(chEl)) {
-            // DIRECT CHILD LEAF: create <div> and MOVE its children into it (preserve structure)
-            const d = doc.createElement('div');
-            while (chEl.firstChild) d.appendChild(chEl.firstChild);
-            wrapper.appendChild(d);
-          } else {
-            // Nested quotes: for each leaf descendant, create <div> and MOVE its children
-            const leaves = listLeafBlockquotes(chEl);
-            for (let k = 0; k < leaves.length; k++) {
-              const leaf = leaves[k];
-              const d = doc.createElement('div');
-              while (leaf.firstChild) d.appendChild(leaf.firstChild);
-              wrapper.appendChild(d);
-            }
+      for (let i = 0; i < current.childNodes.length; i++) {
+        const node = current.childNodes[i];
+        if (node.nodeType === 3) {
+          const text = (node.nodeValue || '').replace(/\u00A0/g, ' ').trim();
+          if (text.length > 0) {
+            canCollapse = false;
+            break;
           }
           continue;
         }
+        if (node.nodeType !== 1) continue;
 
-        // Non-blockquote child: normalize (preserve UL/OL)
-        const block = normalizeToBlockDiv(ch);
-        if (block) wrapper.appendChild(block as Node);
+        const element = node as HTMLElement;
+        if (element.tagName.toLowerCase() !== 'div' || onlyDiv) {
+          canCollapse = false;
+          break;
+        }
+        onlyDiv = element;
       }
 
-      if (root.parentNode) {
-        root.parentNode.replaceChild(wrapper, root);
+      if (!canCollapse || !onlyDiv) break;
+      chain.push(onlyDiv);
+      current = onlyDiv;
+    }
+
+    return chain;
+  }
+
+  private readIndentPx(element: HTMLElement): number {
+    const marginLeft = (element.style.marginLeft || '').trim();
+    const direct = /^(\d+(?:\.\d+)?)px$/i.exec(marginLeft);
+    if (direct) return Number(direct[1]);
+
+    const margin = (element.style.margin || '').trim().split(/\s+/);
+    if (margin.length === 0) return 0;
+    const left = margin.length === 1
+      ? margin[0]
+      : margin.length === 2 || margin.length === 3
+        ? margin[1]
+        : margin[3];
+    const shorthand = /^(\d+(?:\.\d+)?)px$/i.exec(left || '');
+    return shorthand ? Number(shorthand[1]) : 0;
+  }
+
+  /** Merge already-sanitized visual styles while discarding quote layout. */
+  private copyPresentationStyles(
+    sources: HTMLElement[],
+    target: HTMLElement,
+  ): void {
+    const allowed = [
+      'font-family',
+      'background-color',
+      'color',
+      'text-align',
+      'font-weight',
+      'font-style',
+    ];
+    for (let i = 0; i < sources.length; i++) {
+      const sourceStyle = sources[i].style;
+      for (let s = 0; s < sourceStyle.length; s++) {
+        const property = sourceStyle.item(s).toLowerCase();
+        if (allowed.indexOf(property) === -1) continue;
+        target.style.setProperty(
+          property,
+          sourceStyle.getPropertyValue(property),
+          sourceStyle.getPropertyPriority(property),
+        );
       }
     }
   }
@@ -400,7 +390,7 @@ export class HtmlCleanerService {
       if (!li || li.tagName.toLowerCase() !== 'li') return null;
       if (liHasMeaningfulContent(li)) return null;
 
-      let found: HTMLElement = null;
+      let found: HTMLElement | null = null;
       for (let i = 0; i < li.children.length; i++) {
         const c = li.children[i] as HTMLElement;
         if (isList(c)) {
@@ -482,7 +472,7 @@ export class HtmlCleanerService {
 
             if (prev && prev.tagName.toLowerCase() === 'li') {
               // attach sublists after prev <li> (as siblings)
-              let ref: ChildNode = prev.nextSibling;
+              let ref: ChildNode | null = prev.nextSibling;
               for (let s = 0; s < subLists.length; s++) {
                 list.insertBefore(subLists[s], ref);
                 ref = subLists[s].nextSibling;
@@ -546,7 +536,7 @@ export class HtmlCleanerService {
         }
 
         // move each sublist to be a sibling after li
-        let insertRef: ChildNode = li.nextSibling;
+        let insertRef: ChildNode | null = li.nextSibling;
         for (let s = 0; s < sublists.length; s++) {
           list.insertBefore(sublists[s], insertRef);
           insertRef = sublists[s].nextSibling;
@@ -632,6 +622,12 @@ export class HtmlCleanerService {
         }
         if (prop === 'font-style' && val === 'italic') {
           newStyles.push(`${prop}: ${val}`);
+        }
+        if (prop === 'margin-left') {
+          const indent = /^(\d+(?:\.\d+)?)px$/i.exec(val);
+          if (indent && Number(indent[1]) > 0 && Number(indent[1]) <= 2000) {
+            newStyles.push(`margin-left: ${Number(indent[1])}px`);
+          }
         }
         if (prop === 'display' && val === 'none') continue;
         if (prop === 'visibility' && val === 'hidden') continue;
@@ -773,6 +769,13 @@ export class HtmlCleanerService {
       const re = new RegExp(prop + '\\s*:\\s*([^;]+)', 'i');
       const m = re.exec(styleStr || '');
       return m ? m[1].trim() : null;
+    }
+
+    const blockquotes = doc.querySelectorAll('blockquote');
+    if (blockquotes.length > 0) {
+      errors.push(
+        'Legacy blockquote indentation detected. Reformat the content before exporting to PDF.',
+      );
     }
 
     // -----------------------------------------------------------------
