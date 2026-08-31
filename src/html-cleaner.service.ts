@@ -42,7 +42,7 @@ export class HtmlCleanerService {
   sanitize(html: string): string {
     const sanitized = sanitizeHtml(html, {
       allowedTags: [
-        'p', 'br', 'b', 'i', 'u','strong','em',
+        'p', 'br', 'b', 'i', 'u', 'strike', 'strong', 'em',
         'ul', 'ol', 'li',
         'table', 'thead', 'tbody', 'tr', 'td', 'th',
         'span','div', 'img',
@@ -100,7 +100,8 @@ export class HtmlCleanerService {
     this.foldDanglingWrapperListsKeepWrapper(doc); // Fold single-shell wrapper lists (keep wrapper type)
     this.mergeEmptyListItemsIntoPrevious(doc); // Merge empty <li> that only contain sublists into previous
     this.hoistSublistsOutOfLiForIText(doc); // Hoist sublists out of <li> for iText5 compatibility
-    this.convertBlockquoteIndentationToDivs(doc); // Step 5. Preserve indent while removing iText5-hostile blockquotes/deep wrappers
+    this.convertBlockquoteIndentationToParagraphs(doc); // Step 5a. Normalize legacy blockquote indentation
+    this.convertIndentedDivsToParagraphs(doc); // Step 5b. Normalize safe-editor div indentation for iTextPDF 5
 
     // Step 6. Hygiene cleanup
     this.removeEmptyTags(doc);
@@ -173,9 +174,10 @@ export class HtmlCleanerService {
    *
    * Chrome's execCommand('indent') uses a blockquote and adds one nested div
    * for every additional level. XML Worker in iText 5 is fragile with that
-   * structure. The canonical output is one flat div with margin-left.
+   * structure. The canonical output is one flat paragraph with margin-left,
+   * which iTextPDF 5 renders more reliably than an indented div.
    */
-  private convertBlockquoteIndentationToDivs(doc: Document): void {
+  private convertBlockquoteIndentationToParagraphs(doc: Document): void {
     const blockquotes = Array.prototype.slice.call(
       doc.querySelectorAll('blockquote'),
     ) as HTMLElement[];
@@ -208,7 +210,7 @@ export class HtmlCleanerService {
         indentPx += (chain.length - 1) * 40;
       }
 
-      const replacement = doc.createElement('div');
+      const replacement = doc.createElement('p');
       const styleSources: HTMLElement[] = [blockquote].concat(chain);
       this.copyPresentationStyles(styleSources, replacement);
       replacement.style.marginLeft = Math.min(indentPx, 2000) + 'px';
@@ -228,6 +230,48 @@ export class HtmlCleanerService {
     for (let i = 0; i < normalized.length; i++) {
       normalized[i].removeAttribute('data-ae-normalized-indent');
     }
+  }
+
+  /**
+   * Convert flat indented divs emitted by the patched editor into paragraphs.
+   * iTextPDF 5 applies margin-left reliably to paragraphs but may ignore it on
+   * div elements. Only paragraph-compatible divs are converted so this method
+   * does not create invalid HTML around tables, lists, headings, or other blocks.
+   */
+  private convertIndentedDivsToParagraphs(doc: Document): void {
+    const divs = Array.prototype.slice.call(
+      doc.querySelectorAll('div[style]'),
+    ) as HTMLElement[];
+
+    for (let i = 0; i < divs.length; i++) {
+      const div = divs[i];
+      if (!div.parentNode) continue;
+
+      const indentPx = this.readIndentPx(div);
+      if (indentPx <= 0 || this.containsBlockContent(div)) continue;
+
+      const replacement = doc.createElement('p');
+      this.copyPresentationStyles([div], replacement);
+      replacement.style.marginLeft = Math.min(indentPx, 2000) + 'px';
+
+      const align = div.getAttribute('align');
+      if (align) replacement.setAttribute('align', align);
+
+      while (div.firstChild) {
+        replacement.appendChild(div.firstChild);
+      }
+
+      div.parentNode.replaceChild(replacement, div);
+    }
+  }
+
+  /** Return true when a div cannot be represented safely as a paragraph. */
+  private containsBlockContent(element: HTMLElement): boolean {
+    return element.querySelector(
+      'address, article, aside, blockquote, div, dl, fieldset, figure, ' +
+      'footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ' +
+      'ol, p, pre, section, table, ul',
+    ) !== null;
   }
 
   /** Return a chain where each container has exactly one meaningful div child. */
@@ -655,7 +699,8 @@ export class HtmlCleanerService {
       const content = span.textContent
         ? span.textContent.replace(/[\u0000-\b]/g, '').trim()
         : '';
-      const hasStyle = span.getAttribute('style') ? span.getAttribute('style')?.trim() : '';
+      const style = span.getAttribute('style');
+      const hasStyle = style ? style.trim() : '';
 
       if (!content && !hasStyle) {
         span.remove();
@@ -676,7 +721,7 @@ export class HtmlCleanerService {
    * @param doc The Document object to be processed
    */
   private unwrapInlineWrappingBlock(doc: Document): void {
-    const inlineTags = ['b', 'i', 'u', 'em', 'strong', 'span'];
+    const inlineTags = ['b', 'i', 'u', 'strike', 'em', 'strong', 'span'];
     const blockTags = ['p', 'div', 'table', 'ul', 'ol', 'li'];
 
     inlineTags.forEach((inline) => {
@@ -781,7 +826,7 @@ export class HtmlCleanerService {
     // -----------------------------------------------------------------
     // 2) Block elements inside inline wrappers (problematic in iText5)
     // -----------------------------------------------------------------
-    const inlineTags = ['b', 'i', 'u', 'em', 'strong', 'span'];
+    const inlineTags = ['b', 'i', 'u', 'strike', 'em', 'strong', 'span'];
     const blockTags = [ 'p', 'div', 'table', 'ul',  'ol','li', 'thead', 'tbody', 'tr', 'td', 'th', 'h1', 'h2', 'h3', 'h4',  'h5', 'h6',
     ];
     for (let t = 0; t < inlineTags.length; t++) {
