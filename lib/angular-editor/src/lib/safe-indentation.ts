@@ -4,8 +4,9 @@ const SAFE_INDENT_CLASS_PREFIX = 'ae-safe-indent-px-';
 const MAX_SAFE_INDENT_PX = 2000;
 
 /**
- * Keep editor indentation as flat CSS instead of relying on execCommand's
- * browser-specific <blockquote><div>...</div></blockquote> output.
+ * Keep editor indentation as flat paragraph CSS instead of relying on
+ * execCommand's browser-specific <blockquote><div>...</div></blockquote>
+ * output. iTextPDF 5 renders margin-left reliably on paragraph elements.
  *
  * The function intentionally falls back for list items so the browser keeps
  * its native ordered/unordered-list nesting behavior.
@@ -32,11 +33,19 @@ export function applySafeIndentation(
   }
 
   for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
+    let block = blocks[i];
     const currentIndent = readPixelMarginLeft(block);
     const nextIndent = command === 'indent'
       ? currentIndent + stepPx
       : Math.max(0, currentIndent - stepPx);
+
+    // Browsers may use DIV as the paragraph separator in contenteditable.
+    // Convert only an actual indentation target to P so the saved HTML is
+    // rendered consistently by iTextPDF 5. The selection remains valid
+    // because its text nodes are moved, not recreated.
+    if (nextIndent > 0 || currentIndent > 0) {
+      block = convertIndentedDivToParagraph(doc, block, range);
+    }
 
     if (nextIndent > 0) {
       block.style.marginLeft = nextIndent + 'px';
@@ -49,6 +58,61 @@ export function applySafeIndentation(
   }
 
   return true;
+}
+
+/**
+ * Convert a text-only DIV indentation target to P while preserving its
+ * attributes and the active Range. DIVs containing another block remain
+ * unchanged to avoid producing invalid nested paragraph markup.
+ */
+function convertIndentedDivToParagraph(
+  doc: Document,
+  block: HTMLElement,
+  range: Range,
+): HTMLElement {
+  if (
+    block.tagName !== 'DIV' ||
+    !block.parentNode ||
+    containsBlockContent(block)
+  ) {
+    return block;
+  }
+
+  const startIsBlock = range.startContainer === block;
+  const endIsBlock = range.endContainer === block;
+  const startOffset = range.startOffset;
+  const endOffset = range.endOffset;
+  const paragraph = doc.createElement('p');
+
+  for (let i = 0; i < block.attributes.length; i++) {
+    const attribute = block.attributes.item(i);
+    if (attribute) {
+      paragraph.setAttribute(attribute.name, attribute.value);
+    }
+  }
+
+  while (block.firstChild) {
+    paragraph.appendChild(block.firstChild);
+  }
+
+  block.parentNode.replaceChild(paragraph, block);
+
+  if (startIsBlock) {
+    range.setStart(paragraph, Math.min(startOffset, paragraph.childNodes.length));
+  }
+  if (endIsBlock) {
+    range.setEnd(paragraph, Math.min(endOffset, paragraph.childNodes.length));
+  }
+
+  return paragraph;
+}
+
+function containsBlockContent(element: HTMLElement): boolean {
+  return element.querySelector(
+    'address, article, aside, blockquote, div, dl, fieldset, figure, ' +
+    'footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ' +
+    'ol, p, pre, section, table, ul',
+  ) !== null;
 }
 
 /**
