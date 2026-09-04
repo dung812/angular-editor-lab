@@ -23,6 +23,19 @@
       // z-index: 2;
       position: relative;
       // pointer-events: none;
+
+      // UI-only compact rendering. HtmlCleanerService intentionally keeps
+      // 16px in persisted/PDF HTML; these rules never change innerHTML.
+      &.ae-compact-default-font {
+        ::ng-deep [style*='font-size: 16px']:not(h1):not(h2):not(h3):not(h4):not(h5):not(h6),
+        ::ng-deep [style*='font-size:16px']:not(h1):not(h2):not(h3):not(h4):not(h5):not(h6),
+        ::ng-deep [style*='font-size: 1rem']:not(h1):not(h2):not(h3):not(h4):not(h5):not(h6),
+        ::ng-deep [style*='font-size:1rem']:not(h1):not(h2):not(h3):not(h4):not(h5):not(h6),
+        ::ng-deep font[size='3'] {
+          font-size: 14px !important;
+        }
+      }
+
       &:focus,
       &.focus {
        // outline: 0;

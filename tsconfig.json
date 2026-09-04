@@ -23,9 +23,35 @@
     "lib": [
       "ES2022",
       "dom"
-    ]
+    ],
+
+    /* Relaxed type-checking: this is a study/research playground, not a
+       production app. Everything below is explicitly disabled so the editor
+       cannot re-enable it via its own implicit-project defaults. */
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": false,
+    "strictPropertyInitialization": false,
+    "strictFunctionTypes": false,
+    "strictBindCallApply": false,
+    "noImplicitThis": false,
+    "useUnknownInCatchVariables": false,
+    "noImplicitReturns": false,
+    "noImplicitOverride": false,
+    "noFallthroughCasesInSwitch": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
   },
   "angularCompilerOptions": {
-    "enableI18nLegacyMessageIdFormat": false
+    "enableI18nLegacyMessageIdFormat": false,
+
+    /* Template checking kept loose to match the relaxed TS settings above. */
+    "strictTemplates": false,
+    "fullTemplateTypeCheck": false,
+    "strictInjectionParameters": false,
+    "strictInputAccessModifiers": false
   }
 }

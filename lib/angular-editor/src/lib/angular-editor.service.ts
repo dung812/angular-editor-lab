@@ -142,9 +142,8 @@ export class AngularEditorService {
         // this.savedSelection.select();
         return true;
       }
-    } else {
-      return false;
     }
+    return false;
   }
 
   /**
@@ -157,7 +156,7 @@ export class AngularEditorService {
   /** check any selection is made or not */
   private checkSelection(): any {
 
-    const selectedText = this.savedSelection.toString();
+    const selectedText = this.savedSelection ? this.savedSelection.toString() : '';
 
     if (selectedText.length === 0) {
       throw new Error('No Selection Made');
@@ -256,7 +255,7 @@ export class AngularEditorService {
   getRangeSelectedNodes(range, includePartiallySelectedContainers) {
     let node = range.startContainer;
     const endNode = range.endContainer;
-    let rangeNodes = [];
+    let rangeNodes: any[] = [];
 
     // Special case for a range that is contained within a single node
     if (node === endNode) {
@@ -288,7 +287,7 @@ export class AngularEditorService {
   }
 
   getSelectedNodes() {
-    const nodes = [];
+    const nodes: any[] = [];
     if (this.doc.getSelection) {
       const sel = this.doc.getSelection();
       for (let i = 0, len = sel.rangeCount; i < len; ++i) {

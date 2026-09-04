@@ -120,7 +120,7 @@ export class AngularEditorToolbarComponent {
   @Input() fonts: SelectOption[] = [{label: '', value: ''}];
 
   @Input()
-  set customClasses(classes: CustomClass[]) {
+  set customClasses(classes: CustomClass[] | undefined) {
     if (classes) {
       this._customClasses = classes;
       this.customClassList = this._customClasses.map((x, i) => ({label: x.name, value: i.toString()}));
@@ -129,20 +129,20 @@ export class AngularEditorToolbarComponent {
   }
 
   @Input()
-  set defaultFontName(value: string) {
+  set defaultFontName(value: string | undefined) {
     if (value) {
       this.fontName = value;
     }
   }
 
   @Input()
-  set defaultFontSize(value: string) {
+  set defaultFontSize(value: string | undefined) {
     if (value) {
       this.fontSize = value;
     }
   }
 
-  @Input() hiddenButtons: string[][];
+  @Input() hiddenButtons: string[][] | undefined;
 
   @Output() execute: EventEmitter<string> = new EventEmitter<string>();
 
@@ -264,15 +264,15 @@ export class AngularEditorToolbarComponent {
   insertUrl() {
     let url = 'https:\/\/';
     const selection = this.editorService.savedSelection;
-    if (selection && selection.commonAncestorContainer.parentElement.nodeName === 'A') {
+    if (selection && selection.commonAncestorContainer.parentElement?.nodeName === 'A') {
       const parent = selection.commonAncestorContainer.parentElement as HTMLAnchorElement;
       if (parent.href !== '') {
         url = parent.href;
       }
     }
-    url = prompt('Insert URL link', url);
-    if (url && url !== '' && url !== 'https://') {
-      this.editorService.createLink(url);
+    const promptedUrl = prompt('Insert URL link', url);
+    if (promptedUrl && promptedUrl !== '' && promptedUrl !== 'https://') {
+      this.editorService.createLink(promptedUrl);
     }
   }
 
@@ -333,7 +333,7 @@ export class AngularEditorToolbarComponent {
     if (file.type.includes('image/')) {
         if (this.uploadUrl) {
             this.editorService.uploadImage(file).subscribe(e => {
-              if (e instanceof HttpResponse) {
+              if (e instanceof HttpResponse && e.body) {
                 this.editorService.insertImage(e.body.imageUrl);
                 event.srcElement.value = null;
               }
@@ -342,7 +342,9 @@ export class AngularEditorToolbarComponent {
           const reader = new FileReader();
           reader.onload = (e: ProgressEvent) => {
             const fr = e.currentTarget as FileReader;
-            this.editorService.insertImage(fr.result.toString());
+            if (fr.result) {
+              this.editorService.insertImage(fr.result.toString());
+            }
           };
           reader.readAsDataURL(file);
         }

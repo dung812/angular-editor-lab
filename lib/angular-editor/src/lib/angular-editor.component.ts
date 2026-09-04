@@ -29,6 +29,18 @@ import {
   restoreSafeIndentationAfterSanitizer,
 } from './safe-indentation';
 
+const EDITOR_DEFAULT_FONT_FAMILY = 'Arial';
+const EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX = '14px';
+const EDITOR_LEGACY_FONT_SIZE_PX: { [size: string]: string } = {
+  '1': '10px',
+  '2': '13px',
+  '3': '16px',
+  '4': '18px',
+  '5': '24px',
+  '6': '32px',
+  '7': '48px',
+};
+
 @Component({
   selector: 'angular-editor',
   templateUrl: './angular-editor.component.html',
@@ -44,8 +56,8 @@ import {
 })
 export class AngularEditorComponent implements OnInit, ControlValueAccessor, AfterViewInit, OnDestroy {
 
-  private onChange: (value: string) => void;
-  private onTouched: () => void;
+  private onChange: (value: string) => void = () => undefined;
+  private onTouched: () => void = () => undefined;
 
   modeVisual = true;
   showPlaceholder = false;
@@ -62,11 +74,11 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   @Input() placeholder = '';
   @Input() tabIndex: number | null;
 
-  @Output() html;
+  @Output() html = new EventEmitter<string>();
 
-  @ViewChild('editor', {static: true}) textArea: ElementRef;
-  @ViewChild('editorWrapper', {static: true}) editorWrapper: ElementRef;
-  @ViewChild('editorToolbar', {static: false}) editorToolbar: AngularEditorToolbarComponent;
+  @ViewChild('editor', {static: true}) textArea!: ElementRef;
+  @ViewChild('editorWrapper', {static: true}) editorWrapper!: ElementRef;
+  @ViewChild('editorToolbar', {static: false}) editorToolbar!: AngularEditorToolbarComponent;
 
   @Output() viewMode = new EventEmitter<boolean>();
 
@@ -187,7 +199,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
 
     if (event.relatedTarget !== null) {
       const parent = (event.relatedTarget as HTMLElement).parentElement;
-      if (!parent.classList.contains('angular-editor-toolbar-set') && !parent.classList.contains('ae-picker')) {
+      if (parent && !parent.classList.contains('angular-editor-toolbar-set') && !parent.classList.contains('ae-picker')) {
         this.blurEvent.emit(event);
         this.focused = false;
       }
@@ -391,7 +403,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     }
 
     let a = userSelection.focusNode;
-    const els = [];
+    const els: any[] = [];
     while (a && a.id !== 'editor') {
       els.unshift(a);
       a = a.parentNode;
@@ -400,8 +412,9 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   }
 
   private configure() {
-    this.editorService.uploadUrl = this.config.uploadUrl;
-    this.editorService.uploadWithCredentials = this.config.uploadWithCredentials;
+    this.editorService.uploadUrl = this.config.uploadUrl ?? angularEditorConfig.uploadUrl ?? '';
+    this.editorService.uploadWithCredentials =
+      this.config.uploadWithCredentials ?? angularEditorConfig.uploadWithCredentials ?? false;
     if (this.config.defaultParagraphSeparator) {
       this.editorService.setDefaultParagraphSeparator(this.config.defaultParagraphSeparator);
     }
@@ -414,15 +427,47 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   }
 
   getFonts() {
-    const fonts = this.config.fonts ? this.config.fonts : angularEditorConfig.fonts;
+    const fonts = this.config.fonts || angularEditorConfig.fonts || [];
     return fonts.map(x => {
       return {label: x.name, value: x.name};
     });
   }
 
+  /**
+   * Keep the contenteditable baseline aligned with HtmlCleanerService.
+   * execCommand('fontName'/'fontSize') only affects the active selection and
+   * does not provide a reliable default for HTML loaded back into the editor.
+   */
+  getDefaultFontNameCss(): string {
+    return this.config.defaultFontName || EDITOR_DEFAULT_FONT_FAMILY;
+  }
+
+  getDefaultFontSizeCss(): string {
+    const configured = this.config.defaultFontSize || '3';
+    if (configured === '3' || configured.toLowerCase() === '16px') {
+      return EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX;
+    }
+
+    const legacySize = EDITOR_LEGACY_FONT_SIZE_PX[configured];
+    if (legacySize) return legacySize;
+
+    const pixelSize = /^(\d+(?:\.\d+)?)px$/i.exec(configured);
+    if (!pixelSize) return EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX;
+
+    const value = Number(pixelSize[1]);
+    return value >= 6 && value <= 96
+      ? value + 'px'
+      : EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX;
+  }
+
+  /** True when the default 16px content should be rendered as 14px in UI. */
+  useCompactDefaultFontSize(): boolean {
+    return this.getDefaultFontSizeCss() === EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX;
+  }
+
   getCustomTags() {
     const tags = ['span'];
-    this.config.customClasses.forEach(x => {
+    (this.config.customClasses || []).forEach(x => {
       if (x.tag !== undefined) {
         if (!tags.includes(x.tag)) {
           tags.push(x.tag);

@@ -2,7 +2,7 @@
      [style.minWidth]="config.minWidth">
   <angular-editor-toolbar *ngIf="config.toolbarPosition === 'top'" #editorToolbar
                           [id]="id"
-                          [uploadUrl]="config.uploadUrl"
+                          [uploadUrl]="config.uploadUrl || ''"
                           [showToolbar]="config.showToolbar !== undefined ? config.showToolbar : true"
                           [fonts]="getFonts()"
                           [customClasses]="config.customClasses"
@@ -13,6 +13,7 @@
 
   <div class="angular-editor-wrapper" #editorWrapper>
     <div #editor class="angular-editor-textarea"
+         [class.ae-compact-default-font]="useCompactDefaultFontSize()"
          [attr.contenteditable]="config.editable"
          [attr.tabindex]="disabled ? -1 : tabIndex"
          [attr.translate]="config.translate"
@@ -20,8 +21,10 @@
          [style.height]="config.height"
          [style.minHeight]="config.minHeight"
          [style.maxHeight]="config.maxHeight"
+         [style.font-family]="getDefaultFontNameCss()"
+         [style.font-size]="getDefaultFontSizeCss()"
          [style.outline]="config.outline === false ? 'none': undefined"
-         (input)="onContentChange($event.target)"
+         (input)="onContentChange(editor)"
          (focus)="onTextAreaFocus($event)"
          (blur)="onTextAreaBlur($event)"
          (click)="exec()"
@@ -33,7 +36,7 @@
   </div>
   <angular-editor-toolbar *ngIf="config.toolbarPosition === 'bottom'" #editorToolbar
                           [id]="id"
-                          [uploadUrl]="config.uploadUrl"
+                          [uploadUrl]="config.uploadUrl || ''"
                           [showToolbar]="config.showToolbar !== undefined ? config.showToolbar : true"
                           [fonts]="getFonts()"
                           [customClasses]="config.customClasses"
