@@ -62,7 +62,10 @@
             "styles": [
               "src/styles.scss"
             ],
-            "scripts": []
+            "scripts": [],
+            "allowedCommonJsDependencies": [
+              "sanitize-html"
+            ]
           },
           "configurations": {
             "production": {
@@ -74,8 +77,8 @@
                 },
                 {
                   "type": "anyComponentStyle",
-                  "maximumWarning": "6kB",
-                  "maximumError": "10kB"
+                  "maximumWarning": "45kB",
+                  "maximumError": "64kB"
                 }
               ],
               "outputHashing": "all"

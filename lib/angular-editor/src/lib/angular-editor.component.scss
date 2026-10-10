@@ -41,6 +41,12 @@
        // outline: 0;
       }
 
+      &.ae-content-loading,
+      ::ng-deep .ae-attachment-loading {
+        color: #6c757d;
+        font-style: italic;
+      }
+
       ::ng-deep blockquote {
         margin-left: 1rem;
         border-left: 0.2em solid #dfe2e5;

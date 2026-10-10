@@ -1,3 +1,8 @@
+
+import {UploadResponse} from './angular-editor.service';
+import {HttpEvent, HttpEventType} from '@angular/common/http';
+import {Observable} from 'rxjs';
+import {environment} from '../../environments/environment';
 export interface CustomClass {
   name: string;
   class: string;
@@ -25,6 +30,7 @@ export interface AngularEditorConfig {
   defaultFontName?: string;
   defaultFontSize?: '1' | '2' | '3' | '4' | '5' | '6' | '7' | string;
   uploadUrl?: string;
+  upload?: (file: File) => Observable<HttpEvent<UploadResponse>>;
   uploadWithCredentials?: boolean;
   fonts?: Font[];
   customClasses?: CustomClass[];
@@ -32,6 +38,12 @@ export interface AngularEditorConfig {
   toolbarPosition?: 'top' | 'bottom';
   outline?: boolean;
   toolbarHiddenButtons?: string[][];
+  rawPaste?: boolean;
+  previewMode?: boolean;
+  urlPreviewMode?: string;
+  sectionName?:string;
+  clwId?: string;
+  isFetchForFirstTimePreviewMode?: boolean;
 }
 
 export const angularEditorConfig: AngularEditorConfig = {
@@ -60,6 +72,11 @@ export const angularEditorConfig: AngularEditorConfig = {
   sanitize: true,
   toolbarPosition: 'top',
   outline: true,
+  previewMode: false,
+  urlPreviewMode: '',
+  sectionName: '',
+  clwId: '',
+  // isFetchForFirstTimePreviewMode: true
   /*toolbarHiddenButtons: [
     ['bold', 'italic', 'underline', 'strikeThrough', 'superscript', 'subscript'],
     ['heading', 'fontName', 'fontSize', 'color'],
@@ -69,3 +86,11 @@ export const angularEditorConfig: AngularEditorConfig = {
     ['link', 'unlink', 'image', 'video']
   ]*/
 };
+
+export const httpUrlConfig = {
+  POST_IMAGE_URL: environment.apiUrl + 'clw/upload-binary',
+  GET_IMAGE_URL: (urlPreviewMode, sectionName) => `${environment.apiUrl}${sectionName}/${urlPreviewMode}?isPreview=true`,
+  GET_ORIGINAL_DESCRIPTION: (urlPreviewMode, sectionName) => `${environment.apiUrl}${sectionName}/${urlPreviewMode}`,
+  GET_TESTING_IMAGE_URL: (urlPreviewMode, sectionName, clw) => `${environment.apiUrl}clw/${clw}/sections/${sectionName}?path=${urlPreviewMode}&isPreview=true`,
+  GET_TESTING_ORIGINAL_DESCRIPTION: (urlPreviewMode, sectionName, clw) => `${environment.apiUrl}clw/${clw}/sections/${sectionName}?path=${urlPreviewMode}`,
+}

@@ -1,9 +1,10 @@
 import {Component, ElementRef, EventEmitter, Inject, Input, Output, Renderer2, ViewChild} from '@angular/core';
-import {AngularEditorService} from './angular-editor.service';
-import {HttpResponse} from '@angular/common/http';
+import {AngularEditorService, UploadResponse} from './angular-editor.service';
+import {HttpResponse, HttpEvent} from '@angular/common/http';
 import {DOCUMENT} from '@angular/common';
 import {CustomClass} from './config';
 import {SelectOption} from './ae-select/ae-select.component';
+import { Observable } from 'rxjs';
 
 @Component({
   selector: 'angular-editor-toolbar',
@@ -12,6 +13,12 @@ import {SelectOption} from './ae-select/ae-select.component';
 })
 
 export class AngularEditorToolbarComponent {
+  @Input() previewMode?: boolean = false;
+  @Input() isPreviewMode?: boolean = true;
+  @Input() isLoadingContent = false;
+  @Input() isUploading = false;
+  @Input() urlPreviewMode?: boolean = false;
+
   htmlMode = false;
   linkSelected = false;
   block = 'default';
@@ -116,6 +123,8 @@ export class AngularEditorToolbarComponent {
 
   @Input() id: string;
   @Input() uploadUrl: string;
+  @Input() upload: (file: File) => Observable<HttpEvent<UploadResponse>>;
+
   @Input() showToolbar: boolean;
   @Input() fonts: SelectOption[] = [{label: '', value: ''}];
 
@@ -270,9 +279,9 @@ export class AngularEditorToolbarComponent {
         url = parent.href;
       }
     }
-    const promptedUrl = prompt('Insert URL link', url);
-    if (promptedUrl && promptedUrl !== '' && promptedUrl !== 'https://') {
-      this.editorService.createLink(promptedUrl);
+    url = prompt('Insert URL link', url);
+    if (url && url !== '' && url !== 'https://') {
+      this.editorService.createLink(url);
     }
   }
 
@@ -331,24 +340,35 @@ export class AngularEditorToolbarComponent {
   onFileChanged(event) {
     const file = event.target.files[0];
     if (file.type.includes('image/')) {
+        // if (this.uploadUrl) {
+        //     this.editorService.uploadImage(file).subscribe(e => {
+        //       if (e instanceof HttpResponse && e.body) {
+        //         this.editorService.insertImage(e.body.imageUrl);
+        //         event.srcElement.value = null;
+        //       }
+        //     });
+        // }
+
         if (this.uploadUrl) {
-            this.editorService.uploadImage(file).subscribe(e => {
-              if (e instanceof HttpResponse && e.body) {
-                this.editorService.insertImage(e.body.imageUrl);
-                event.srcElement.value = null;
-              }
-            });
-        } else {
+          this.upload(file).subscribe((response: HttpResponse<UploadResponse>) => this.watchUploadImage(response, event));
+        } else if(this.uploadUrl) {
+          this.editorService.uploadImage(file).subscribe((response: HttpResponse<UploadResponse>) => this.watchUploadImage(response, event));
+        }
+        else {
           const reader = new FileReader();
           reader.onload = (e: ProgressEvent) => {
             const fr = e.currentTarget as FileReader;
-            if (fr.result) {
-              this.editorService.insertImage(fr.result.toString());
-            }
+            this.editorService.insertImage(fr.result.toString());
           };
           reader.readAsDataURL(file);
         }
       }
+  }
+
+  watchUploadImage(response: HttpResponse<UploadResponse>, event: any) {
+    const {imageUrl} = response.body;
+    this.editorService.insertImage(imageUrl);
+    event.srcElement.value = null;
   }
 
   /**

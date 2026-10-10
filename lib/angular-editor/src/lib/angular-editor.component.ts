@@ -1,8 +1,10 @@
+import {DOCUMENT} from '@angular/common';
 import {
   AfterViewInit,
   Attribute,
   ChangeDetectorRef,
   Component,
+  ContentChild,
   ElementRef,
   EventEmitter,
   forwardRef,
@@ -10,24 +12,46 @@ import {
   HostListener,
   Inject,
   Input,
+  OnChanges,
   OnDestroy,
   OnInit,
   Output,
   Renderer2,
   SecurityContext,
+  SimpleChanges,
   ViewChild
 } from '@angular/core';
 import {ControlValueAccessor, NG_VALUE_ACCESSOR} from '@angular/forms';
-import {AngularEditorConfig, angularEditorConfig} from './config';
+import {DomSanitizer} from '@angular/platform-browser';
 import {AngularEditorToolbarComponent} from './angular-editor-toolbar.component';
 import {AngularEditorService} from './angular-editor.service';
-import {DOCUMENT} from '@angular/common';
-import {DomSanitizer} from '@angular/platform-browser';
+import {AngularEditorConfig, angularEditorConfig, httpUrlConfig} from './config';
 import {isDefined} from './utils';
+import {HttpClient} from '@angular/common/http';
+import {ToastrService} from 'ngx-toastr';
+import {EMPTY, Observable, Subject, concat, of, timer} from 'rxjs';
+import {catchError, map, mergeMap, switchMap, takeUntil, timeout} from 'rxjs/operators';
+
+import {
+  ATTACHMENT_LOADING_CLASS,
+  countAttachmentTokens,
+  createAttachmentToken,
+  EditorContentResponse,
+  extractEditorContents,
+  findPreviewOf,
+  findRawOf,
+  isRenderedAttachmentContent,
+  markAttachmentTokens,
+  stripEditorOnlyMarkup,
+  UPLOAD_PLACEHOLDER_ATTR,
+  withAttachmentPlaceholders,
+} from './attachment-preview';
 import {
   encodeSafeIndentationForSanitizer,
   restoreSafeIndentationAfterSanitizer,
 } from './safe-indentation';
+import { HtmlCleanerService } from 'src/html-cleaner.service';
+import { Utils } from 'src/utils/utils';
 
 const EDITOR_DEFAULT_FONT_FAMILY = 'Arial';
 const EDITOR_COMPACT_DEFAULT_FONT_SIZE_PX = '14px';
@@ -40,6 +64,9 @@ const EDITOR_LEGACY_FONT_SIZE_PX: { [size: string]: string } = {
   '6': '32px',
   '7': '48px',
 };
+const SERVER_PREVIEW_RETRY_DELAYS_MS = [1000, 2000, 4000];
+const RAW_CONTENT_TIMEOUT_MS = 15000;
+const TESTING_SECTIONS = ['testing', 'third-party-requirements', 'general-specimen-transportation'];
 
 @Component({
   selector: 'angular-editor',
@@ -54,10 +81,23 @@ const EDITOR_LEGACY_FONT_SIZE_PX: { [size: string]: string } = {
     AngularEditorService
   ]
 })
-export class AngularEditorComponent implements OnInit, ControlValueAccessor, AfterViewInit, OnDestroy {
-
-  private onChange: (value: string) => void = () => undefined;
-  private onTouched: () => void = () => undefined;
+export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAccessor, AfterViewInit, OnDestroy {
+  private contentEditableDiv: HTMLElement;
+  @ViewChild('editor', {static: false}) editor!: ElementRef;
+  @ViewChild('previewPane', {static: true}) previewPane!: ElementRef;
+  editorContent: string = '';
+  isPreviewMode = false;
+  isLoadingContent = false;
+  pendingUploads = 0;
+  /** Editable content with attachment tokens; `null` while only the server-rendered form is known. */
+  private rawValue: string | null = '';
+  private renderedValue = '';
+  private hasModelBinding = false;
+  private readonly previewRequests = new Subject<string | null>();
+  private readonly rawContentRequests = new Subject<boolean>();
+  private readonly destroy$ = new Subject<void>();
+  private onChange: (value: string) => void;
+  private onTouched: () => void;
 
   modeVisual = true;
   showPlaceholder = false;
@@ -71,20 +111,25 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
 
   @Input() id = '';
   @Input() config: AngularEditorConfig = angularEditorConfig;
+  @Input() urlPreviewMode = '';
   @Input() placeholder = '';
   @Input() tabIndex: number | null;
 
-  @Output() html = new EventEmitter<string>();
+  @Output() html;
 
   @ViewChild('editor', {static: true}) textArea!: ElementRef;
   @ViewChild('editorWrapper', {static: true}) editorWrapper!: ElementRef;
   @ViewChild('editorToolbar', {static: false}) editorToolbar!: AngularEditorToolbarComponent;
+  @ContentChild("customButtons") customButtonsTemplateRef?: ElementRef;
+  executeCommandFn = this.executeCommand.bind(this);
 
   @Output() viewMode = new EventEmitter<boolean>();
 
   /** emits `blur` event when focused out from the textarea */
     // tslint:disable-next-line:no-output-native no-output-rename
   @Output('blur') blurEvent: EventEmitter<FocusEvent> = new EventEmitter<FocusEvent>();
+
+  @Output() onFormatContent = new EventEmitter<any>();
 
   /** emits `focus` event when focused in to the textarea */
     // tslint:disable-next-line:no-output-rename no-output-native
@@ -104,7 +149,10 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     private sanitizer: DomSanitizer,
     private cdRef: ChangeDetectorRef,
     @Attribute('tabindex') defaultTabIndex: string,
-    @Attribute('autofocus') private autoFocus: any
+    @Attribute('autofocus') private autoFocus: any,
+    private http: HttpClient,
+    private htmlCleanerService: HtmlCleanerService,
+    private toastrService: ToastrService
   ) {
     const parsedTabIndex = Number(defaultTabIndex);
     this.tabIndex = (parsedTabIndex || parsedTabIndex === 0) ? parsedTabIndex : null;
@@ -112,24 +160,468 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
 
   ngOnInit() {
     this.config.toolbarPosition = this.config.toolbarPosition ? this.config.toolbarPosition : angularEditorConfig.toolbarPosition;
+    if(this.config.previewMode) {
+      this.config.editable = false;
+    }
+    this.isPreviewMode = !!this.config.previewMode;
+
+    this.previewRequests.pipe(
+      switchMap(raw => raw === null ? EMPTY : this.buildPreview(raw)),
+      takeUntil(this.destroy$),
+    ).subscribe(html => this.showPreviewHtml(html));
+
+    this.rawContentRequests.pipe(
+      switchMap(load => load ? this.fetchRawContent() : EMPTY),
+      takeUntil(this.destroy$),
+    ).subscribe(raw => this.onRawContentLoaded(raw));
+  }
+
+  ngOnChanges(changes: SimpleChanges) {
+    const urlChange = changes['urlPreviewMode'];
+    if (urlChange && !urlChange.firstChange) {
+      this.refreshPreviewSource();
+    }
   }
 
   ngAfterViewInit() {
     if (isDefined(this.autoFocus)) {
       this.focus();
     }
+    this.refreshPreviewSource();
+  }
+
+  isContentEditable(): boolean {
+    return this.config.previewMode
+      ? !this.isPreviewMode && !this.isLoadingContent
+      : this.config.editable;
+  }
+
+  private refreshPreviewSource(): void {
+    if (!this.hasModelBinding && this.urlPreviewMode) {
+      this.loadUnboundContent();
+    } else {
+      this.renderPreview();
+    }
+  }
+
+  /** Editors without ngModel/formControl have no other source for their content. */
+  private loadUnboundContent(): void {
+    this.http.get<EditorContentResponse>(this.originalContentUrl())
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(response => {
+        const contents = extractEditorContents(response);
+        if (contents.length > 0 && !this.changed) {
+          this.applyRawValue(contents[0]);
+        }
+      });
+  }
+
+  /**
+   * Some list endpoints return content with attachment tokens already
+   * rendered into <img>. That form is only shown; editing waits for the raw
+   * content. Values arriving in edit mode come from the edit surface itself
+   * (e.g. Reformat), so they are raw.
+   */
+  private applyModelValue(value: string): void {
+    const awaitingRaw = this.isPreviewMode || this.isLoadingContent;
+    if (awaitingRaw && isRenderedAttachmentContent(value)) {
+      this.rawValue = null;
+      this.renderedValue = value;
+      this.refreshView('');
+      this.renderPreview();
+      return;
+    }
+    if (!awaitingRaw && value === this.rawValue) {
+      // Rewriting identical content would reset the caret and drop upload placeholders.
+      return;
+    }
+    this.cancelRawContentLoad();
+    this.applyRawValue(value);
+  }
+
+  private applyRawValue(value: string): void {
+    this.rawValue = value;
+    this.refreshView(value);
+    this.renderPreview();
+  }
+
+  private togglePreviewMode(): void {
+    if (this.isPreviewMode) {
+      this.enterEditMode();
+    } else {
+      this.enterPreviewMode();
+    }
+  }
+
+  private enterEditMode(): void {
+    this.isPreviewMode = false;
+    this.previewRequests.next(null);
+    if (this.rawValue === null) {
+      this.isLoadingContent = true;
+      this.rawContentRequests.next(true);
+    }
+  }
+
+  private enterPreviewMode(): void {
+    if (this.pendingUploads > 0) {
+      this.toastrService.warning('Please wait until the image upload finishes.');
+      return;
+    }
+    this.isPreviewMode = true;
+    this.cancelRawContentLoad();
+    // Consumers persist the note on a focusout without relatedTarget, so this blur doubles as the save trigger.
+    this.editor.nativeElement.blur();
+    this.renderPreview();
+  }
+
+  private cancelRawContentLoad(): void {
+    if (this.isLoadingContent) {
+      this.isLoadingContent = false;
+      this.rawContentRequests.next(false);
+    }
+  }
+
+  private fetchRawContent(): Observable<string | null> {
+    return this.http.get<EditorContentResponse>(this.originalContentUrl()).pipe(
+      timeout(RAW_CONTENT_TIMEOUT_MS),
+      map(response => findRawOf(this.renderedValue, extractEditorContents(response))),
+      catchError(() => of(null)),
+    );
+  }
+
+  private onRawContentLoaded(raw: string | null): void {
+    this.isLoadingContent = false;
+    if (raw === null) {
+      this.isPreviewMode = true;
+      this.renderPreview();
+      this.toastrService.error('Could not load the content for editing. Please try again.');
+      return;
+    }
+    this.applyRawValue(raw);
+  }
+
+  private renderPreview(): void {
+    if (!this.isPreviewMode) {
+      return;
+    }
+    if (this.rawValue === null) {
+      this.previewRequests.next(null);
+      this.showPreviewHtml(this.renderedValue);
+    } else {
+      this.previewRequests.next(this.rawValue);
+    }
+  }
+
+  private showPreviewHtml(html: string): void {
+    this.r.setProperty(this.previewPane.nativeElement, 'innerHTML', html);
+  }
+
+  /**
+   * The local content is the only source of text. The server is consulted
+   * only to turn attachment tokens into images; until it returns a matching
+   * render, tokens show a loading placeholder.
+   */
+  private buildPreview(raw: string): Observable<string> {
+    if (!this.urlPreviewMode || countAttachmentTokens(raw) === 0) {
+      return of(raw);
+    }
+    return concat(of(withAttachmentPlaceholders(raw)), this.fetchServerPreviewMatching(raw));
+  }
+
+  private fetchServerPreviewMatching(raw: string, attempt = 0): Observable<string> {
+    return this.http.get<EditorContentResponse>(this.serverPreviewUrl()).pipe(
+      map(response => findPreviewOf(raw, extractEditorContents(response))),
+      catchError(() => of(null)),
+      mergeMap(preview => {
+        if (preview !== null) {
+          return of(preview);
+        }
+        if (attempt >= SERVER_PREVIEW_RETRY_DELAYS_MS.length) {
+          return of(raw);
+        }
+        return timer(SERVER_PREVIEW_RETRY_DELAYS_MS[attempt]).pipe(
+          mergeMap(() => this.fetchServerPreviewMatching(raw, attempt + 1)),
+        );
+      }),
+    );
+  }
+
+  private serverPreviewUrl(): string {
+    return this.isTestingSection()
+      ? httpUrlConfig.GET_TESTING_IMAGE_URL(this.urlPreviewMode, this.config.sectionName, this.config.clwId)
+      : httpUrlConfig.GET_IMAGE_URL(this.urlPreviewMode, this.config.sectionName);
+  }
+
+  private originalContentUrl(): string {
+    return this.isTestingSection()
+      ? httpUrlConfig.GET_TESTING_ORIGINAL_DESCRIPTION(this.urlPreviewMode, this.config.sectionName, this.config.clwId)
+      : httpUrlConfig.GET_ORIGINAL_DESCRIPTION(this.urlPreviewMode, this.config.sectionName);
+  }
+
+  private isTestingSection(): boolean {
+    return TESTING_SECTIONS.indexOf(this.config.sectionName) !== -1;
+  }
+
+  ngAfterViewChecked() {
+    // Safely wait for the editor DOM to be fully rendered
+    if(this.editor) {
+      const editorRoot = (this.editor as any).editor;
+      if(editorRoot && editorRoot.editorContainer) {
+        const editable = editorRoot.editorContainer.querySelector('[contenteditable]');
+        if(editable && !this.contentEditableDiv) {
+          this.contentEditableDiv = editable;
+        }
+      }
+    }
+  }
+
+  insertMarkdown(markdown: string) {
+    if(!this.textArea) {
+      console.warn('TextArea is not available.');
+      return;
+    }
+
+    const textAreaElement = this.textArea.nativeElement;
+
+    // Check if the element is content-editable or a regular textarea
+    if(textAreaElement.isContentEditable) {
+      textAreaElement.focus();
+      // Handle contentEditable div (live editor body)
+      const selection = window.getSelection();
+      if(!selection || selection.rangeCount === 0) return;
+
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+
+      const span = createAttachmentToken(this.doc, markdown);
+      range.insertNode(span);
+
+      // Move the cursor after the inserted text
+      range.setStartAfter(span);
+      range.setEndAfter(span);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      this.onContentChange(textAreaElement);
+
+      textAreaElement.focus();
+    } else if (textAreaElement instanceof HTMLTextAreaElement) {
+      // Handle regular textarea
+      const cursorPos = textAreaElement.selectionStart;
+      const text = textAreaElement.value;
+      textAreaElement.value = text.slice(0, cursorPos) + markdown + text.slice(cursorPos);
+      textAreaElement.selectionStart = cursorPos + markdown.length;
+      textAreaElement.selectionEnd = textAreaElement.selectionStart;
+    }
+
+    textAreaElement.blur();
+  }
+
+  updateImage(file: File) {
+    const reader = new FileReader();
+    reader.onload = (e: ProgressEvent<FileReader>) => {
+      const imageUrl = e.target.result as string;
+      document.execCommand('insertImage', false, imageUrl);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  /**
+   * The placeholder is inserted at the caret right away, so the token lands
+   * where the image was pasted even if the user keeps typing during the upload.
+   */
+  uploadImageForPreviewMode(file: any): void {
+    const placeholder = this.insertUploadPlaceholder();
+    this.pendingUploads++;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const pureBase64 = (reader.result as string).replace(/^data:image\/\w+;base64,/, '');
+      const payload = {
+        'imageData': pureBase64,
+        'imageType': 'image/png',
+      };
+
+      this.http.post<{fileName: string}>(httpUrlConfig.POST_IMAGE_URL, payload)
+        .pipe(takeUntil(this.destroy$))
+        .subscribe(
+          res => this.completeUpload(placeholder, `![attachment:${res.fileName}]`),
+          () => this.completeUpload(placeholder, null),
+        );
+    };
+    reader.onerror = () => this.completeUpload(placeholder, null);
+    reader.readAsDataURL(file);
+  }
+
+  private insertUploadPlaceholder(): HTMLElement {
+    const editorElement: HTMLElement = this.textArea.nativeElement;
+    const placeholder: HTMLElement = this.doc.createElement('span');
+    placeholder.setAttribute(UPLOAD_PLACEHOLDER_ATTR, 'true');
+    placeholder.setAttribute('contenteditable', 'false');
+    placeholder.className = ATTACHMENT_LOADING_CLASS;
+    placeholder.textContent = 'Uploading image…';
+
+    const selection: Selection | null = this.doc.getSelection();
+    const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+    if (selection && range && editorElement.contains(range.commonAncestorContainer)) {
+      range.deleteContents();
+      range.insertNode(placeholder);
+      range.setStartAfter(placeholder);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else {
+      editorElement.appendChild(placeholder);
+    }
+    return placeholder;
+  }
+
+  private completeUpload(placeholder: HTMLElement, markdown: string | null): void {
+    this.pendingUploads--;
+    if (markdown === null) {
+      this.toastrService.error('Image upload failed. Please try again.');
+    }
+    const editorElement: HTMLElement = this.textArea.nativeElement;
+    if (!editorElement.contains(placeholder)) {
+      // The user deleted the placeholder, which cancels this image.
+      return;
+    }
+
+    const parent = placeholder.parentNode!;
+    if (markdown !== null) {
+      // Insert-then-remove (not replaceChild) so a caret sitting after the placeholder ends up after the token.
+      parent.insertBefore(createAttachmentToken(this.doc, markdown), placeholder);
+    }
+    parent.removeChild(placeholder);
+    this.onContentChange(editorElement);
+    this.requestSave();
+  }
+
+  /**
+   * Consumers persist on a focusout without relatedTarget. Dispatching one
+   * keeps the user's focus where it is, unlike the focus()/blur() pair.
+   */
+  private requestSave(): void {
+    const editorElement: HTMLElement = this.textArea.nativeElement;
+    if (this.doc.activeElement === editorElement) {
+      // The user is still typing here; their own focusout will save.
+      return;
+    }
+    editorElement.dispatchEvent(new FocusEvent('focusout', {bubbles: true, relatedTarget: null}));
+  }
+
+  compressImage(file: File, quality: number, callback: (blob: Blob) => void): void {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      img.src = e.target.result as string;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d')!;
+        let { width, height } = img;
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+        canvas.toBlob(
+          (blob) => {
+            if(blob) {
+              callback(blob);
+            }
+          },
+          'image/jpeg',
+          quality
+        );
+      };
+    };
+    reader.readAsDataURL(file);
+  }
+
+  onPaste(event: ClipboardEvent) {
+    if (!event.clipboardData) {
+      return;
+    }
+
+    if (this.config.previewMode) {
+      const items = Array.from(event.clipboardData.items);
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          event.preventDefault();
+          this.uploadImageForPreviewMode(file);
+          return;
+        }
+      }
+    }
+
+    else {
+      const items = Array.from(event.clipboardData.items);
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile();
+          const EXCEED_MAX_SIZE_IMAGE = 219000;
+
+          if(file && file.size > EXCEED_MAX_SIZE_IMAGE) {
+            event.preventDefault();
+            this.compressImage(file, 0.7, (compressedBlob) => {
+              const compressedFile = new File([compressedBlob], file.name, {
+                type: compressedBlob.type,
+              });
+              this.updateImage(compressedFile);
+            });
+            return;
+          }
+        }
+      }
+    }
+
+    this.sanitizeContent();
+
+    if (this.config.rawPaste) {
+      event.preventDefault();
+      const text = event.clipboardData.getData('text/plain');
+      document.execCommand('insertHTML', false, text);
+      return text;
+    }
   }
 
   /**
    * Executed command from editor header buttons
    * @param command string from triggerCommand
-   * @param value optional value passed through to AngularEditorService
+   * @param value
    */
   executeCommand(command: string, value?: string) {
+    if (this.isLoadingContent && command !== 'preview') {
+      return;
+    }
+    if (this.pendingUploads > 0 && command === 'sanitize-html') {
+      // Reformat rewrites the content and would discard the upload placeholder.
+      this.toastrService.warning('Please wait until the image upload finishes.');
+      return;
+    }
+
     this.focus();
+
+    if (command === 'preview') {
+      this.togglePreviewMode();
+    }
+
+    if(command === 'validate') {
+      const result = this.htmlCleanerService.validateEditorContentForPDF(this.currentContent());
+      if(!result.valid) {
+        const message = 'Validation failed. Your content contains formatting issues that will impact the PDF export. Please select Reformat Content to fix the issues.';
+        this.toastrService.warning(message);
+      } else {
+        this.toastrService.success('Your content has passed validation and is ready to be exported to PDF');
+      }
+    }
+
+    if(command === 'sanitize-html') {
+      this.onFormatContent.emit(stripEditorOnlyMarkup(this.editor.nativeElement.innerHTML));
+    }
+
     if (command === 'focus') {
       return;
     }
+
     if (command === 'toggleEditorMode') {
       this.toggleEditorMode(this.modeVisual);
     } else if (command !== '') {
@@ -199,7 +691,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
 
     if (event.relatedTarget !== null) {
       const parent = (event.relatedTarget as HTMLElement).parentElement;
-      if (parent && !parent.classList.contains('angular-editor-toolbar-set') && !parent.classList.contains('ae-picker')) {
+      if (!parent.classList.contains('angular-editor-toolbar-set') && !parent.classList.contains('ae-picker')) {
         this.blurEvent.emit(event);
         this.focused = false;
       }
@@ -219,6 +711,26 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     }
   }
 
+  sanitizeContent(): void {
+    // Use setTimeout to wait for the browser's paste to complete
+    setTimeout(() => {
+      const editorElement = this.editor.nativeElement;
+      const fullHtml = editorElement.innerHTML;
+      const sanitizedHtml = Utils.sanitizeIfInvalid(fullHtml, fullHtml, this.htmlCleanerService);
+      editorElement.innerHtml = sanitizedHtml;
+
+      // Restore the cursor to the end of the editor
+      const range = document.createRange();
+      const sel = window.getSelection();
+      range.selectNodeContents(editorElement);
+      range.collapse(false);
+      sel.removeAllRanges();
+      sel.addRange(range);
+
+      this.onContentChange(editorElement);
+    }, 0);
+  }
+
   /**
    * Executed from the contenteditable section while the input property changes
    * @param element html element from contenteditable
@@ -233,25 +745,30 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     if ((!html || html === '<br>')) {
       html = '';
     }
+    this.rawValue = this.toModelValue(stripEditorOnlyMarkup(html));
     if (typeof this.onChange === 'function') {
-      let changedHtml = html;
-      if (this.config.sanitize || this.config.sanitize === undefined) {
-        const encodedHtml = encodeSafeIndentationForSanitizer(html, this.doc);
-        const sanitizedHtml = this.sanitizer.sanitize(
-          SecurityContext.HTML,
-          encodedHtml,
-        ) || '';
-        changedHtml = restoreSafeIndentationAfterSanitizer(
-          sanitizedHtml,
-          this.doc,
-        );
-      }
-      this.onChange(changedHtml);
+      this.onChange(this.rawValue);
       if ((!html) !== this.showPlaceholder) {
         this.togglePlaceholder(this.showPlaceholder);
       }
     }
     this.changed = true;
+  }
+
+  private currentContent(): string {
+    return this.rawValue === null
+      ? this.renderedValue
+      : stripEditorOnlyMarkup(this.editor.nativeElement.innerHTML);
+  }
+
+  private toModelValue(html: string): string {
+    const shouldSanitize = this.config.sanitize || this.config.sanitize === undefined;
+    if (!shouldSanitize) {
+      return html;
+    }
+    const encodedHtml = encodeSafeIndentationForSanitizer(html, this.doc);
+    const sanitizedHtml = this.sanitizer.sanitize(SecurityContext.HTML, encodedHtml) || '';
+    return restoreSafeIndentationAfterSanitizer(sanitizedHtml, this.doc);
   }
 
   /**
@@ -261,6 +778,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
    * @param fn a function
    */
   registerOnChange(fn: any): void {
+    this.hasModelBinding = true;
     this.onChange = e => (e === '<br>' ? fn('') : fn(e)) ;
   }
 
@@ -289,7 +807,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
       value = null;
     }
 
-    this.refreshView(value);
+    this.applyModelValue(value === null ? '' : value);
   }
 
   /**
@@ -300,6 +818,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   refreshView(value: string): void {
     const normalizedValue = value === null ? '' : value;
     this.r.setProperty(this.textArea.nativeElement, 'innerHTML', normalizedValue);
+    markAttachmentTokens(this.textArea.nativeElement);
 
     return;
   }
@@ -342,7 +861,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     const editableElement = this.textArea.nativeElement;
 
     if (bToSource) {
-      oContent = this.r.createText(editableElement.innerHTML);
+      oContent = this.r.createText(stripEditorOnlyMarkup(editableElement.innerHTML));
       this.r.setProperty(editableElement, 'innerHTML', '');
       this.r.setProperty(editableElement, 'contentEditable', false);
 
@@ -379,6 +898,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
         oContent.selectNodeContents(editableElement.firstChild);
         this.r.setProperty(editableElement, 'innerHTML', oContent.toString());
       }
+      markAttachmentTokens(editableElement);
       this.r.setProperty(editableElement, 'contentEditable', true);
       this.modeVisual = true;
       this.viewMode.emit(true);
@@ -403,7 +923,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
     }
 
     let a = userSelection.focusNode;
-    const els: any[] = [];
+    const els = [];
     while (a && a.id !== 'editor') {
       els.unshift(a);
       a = a.parentNode;
@@ -412,9 +932,8 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   }
 
   private configure() {
-    this.editorService.uploadUrl = this.config.uploadUrl ?? angularEditorConfig.uploadUrl ?? '';
-    this.editorService.uploadWithCredentials =
-      this.config.uploadWithCredentials ?? angularEditorConfig.uploadWithCredentials ?? false;
+    this.editorService.uploadUrl = this.config.uploadUrl;
+    this.editorService.uploadWithCredentials = this.config.uploadWithCredentials;
     if (this.config.defaultParagraphSeparator) {
       this.editorService.setDefaultParagraphSeparator(this.config.defaultParagraphSeparator);
     }
@@ -427,7 +946,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   }
 
   getFonts() {
-    const fonts = this.config.fonts || angularEditorConfig.fonts || [];
+    const fonts = this.config.fonts ? this.config.fonts : angularEditorConfig.fonts;
     return fonts.map(x => {
       return {label: x.name, value: x.name};
     });
@@ -467,7 +986,7 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
 
   getCustomTags() {
     const tags = ['span'];
-    (this.config.customClasses || []).forEach(x => {
+    this.config.customClasses.forEach(x => {
       if (x.tag !== undefined) {
         if (!tags.includes(x.tag)) {
           tags.push(x.tag);
@@ -478,6 +997,8 @@ export class AngularEditorComponent implements OnInit, ControlValueAccessor, Aft
   }
 
   ngOnDestroy() {
+    this.destroy$.next();
+    this.destroy$.complete();
     if (this.blurInstance) {
       this.blurInstance();
     }

@@ -4,5 +4,13 @@
   [config]="editorConfig">
 </angular-editor>
 
+<div class="lab-actions">
+  <button type="button" (click)="onReformatContent()">Reformat</button>
+  <button type="button" (click)="onSubmitContent()">Submit</button>
+</div>
 
-<button (click)="onSubmit()">submit</button>
+<ul class="lab-errors" *ngIf="pdfValidationErrors.length > 0">
+  <li *ngFor="let error of pdfValidationErrors">{{ error }}</li>
+</ul>
+
+<pre class="lab-output">{{ htmlContent }}</pre>

@@ -1,42 +1,80 @@
 export type SafeIndentationCommand = 'indent' | 'outdent';
 
+/**
+ * Shared indentation policy for the editor side of the pipeline.
+ *
+ * HtmlCleanerService (application-owned) deliberately declares its own copy of
+ * these numbers so the generic editor library never depends on application PDF
+ * code. `src/pdf-html-policy.spec.ts` fails if the two copies drift apart.
+ */
+export const SAFE_INDENT_STEP_PX = 40;
+export const MAX_SAFE_INDENT_PX = 2000;
+
 const SAFE_INDENT_CLASS_PREFIX = 'ae-safe-indent-px-';
-const MAX_SAFE_INDENT_PX = 2000;
+
+/** Blocks that can carry a margin-left indentation directly. */
+const INDENTABLE_BLOCK_TAGS = /^(P|DIV|H1|H2|H3|H4|H5|H6|PRE)$/;
+
+/**
+ * Elements that may legally contain a <p>, used when a naked text node has to
+ * be wrapped before it can be indented.
+ */
+const PARAGRAPH_HOST_TAGS = /^(TD|TH)$/;
+
+const BLOCK_CONTENT_SELECTOR =
+  'address, article, aside, blockquote, div, dl, fieldset, figure, ' +
+  'footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ' +
+  'ol, p, pre, section, table, ul';
 
 /**
  * Keep editor indentation as flat paragraph CSS instead of relying on
  * execCommand's browser-specific <blockquote><div>...</div></blockquote>
  * output. iTextPDF 5 renders margin-left reliably on paragraph elements.
  *
- * The function intentionally falls back for list items so the browser keeps
- * its native ordered/unordered-list nesting behavior.
+ * @returns `true` when the safe implementation owns the command — the caller
+ *   must NOT fall back to `document.execCommand`, even when nothing changed.
+ *   `false` is returned for exactly one situation: the selection touches a
+ *   list item, where the browser's native ordered/unordered nesting is the
+ *   desired behavior. Any other unsupported selection is a safe no-op, because
+ *   falling back would let the browser recreate <blockquote>.
  */
 export function applySafeIndentation(
   doc: Document,
   editorRoot: HTMLElement,
   command: SafeIndentationCommand,
-  stepPx = 40,
+  stepPx = SAFE_INDENT_STEP_PX,
 ): boolean {
   const selection = doc.getSelection ? doc.getSelection() : null;
   if (!selection || selection.rangeCount === 0) {
-    return false;
+    return true; // safe no-op: never hand an unknown selection to execCommand
   }
 
   const range = selection.getRangeAt(0);
   if (!isInsideEditor(editorRoot, range.commonAncestorContainer)) {
+    return true; // safe no-op
+  }
+
+  // Lists are the single intentional native fallback.
+  if (rangeTouchesListItem(range, editorRoot)) {
     return false;
   }
 
+  // Naked text directly inside the editor (or a table cell) has no block to
+  // indent. Wrap it in a paragraph instead of delegating to execCommand, which
+  // is what historically recreated <blockquote>. No-op when the selection is
+  // already made of block elements.
+  wrapLooseInlineContent(doc, editorRoot, range);
+
   const blocks = findSelectedBlocks(editorRoot, range);
-  if (blocks.length === 0 || containsListItem(blocks, editorRoot)) {
-    return false;
+  if (blocks.length === 0) {
+    return true; // safe no-op: normalization impossible, but never a blockquote
   }
 
   for (let i = 0; i < blocks.length; i++) {
     let block = blocks[i];
     const currentIndent = readPixelMarginLeft(block);
     const nextIndent = command === 'indent'
-      ? currentIndent + stepPx
+      ? Math.min(currentIndent + stepPx, MAX_SAFE_INDENT_PX)
       : Math.max(0, currentIndent - stepPx);
 
     // Browsers may use DIV as the paragraph separator in contenteditable.
@@ -107,12 +145,143 @@ function convertIndentedDivToParagraph(
   return paragraph;
 }
 
+/**
+ * Wrap loose inline/text children of the editor (or of a table cell) in a
+ * paragraph so indentation has a block to attach to.
+ *
+ * Nodes are moved, never recreated, so the caller's Range stays alive. This
+ * replaces the historical fallback to execCommand('indent'), which recreated
+ * the <blockquote><div> structure that iTextPDF 5 cannot process.
+ */
+function wrapLooseInlineContent(
+  doc: Document,
+  editorRoot: HTMLElement,
+  range: Range,
+): void {
+  const host = findParagraphHost(editorRoot, range.commonAncestorContainer);
+  if (!host) {
+    return;
+  }
+
+  const children: Node[] = [];
+  for (let i = 0; i < host.childNodes.length; i++) {
+    children.push(host.childNodes[i]);
+  }
+
+  const startIndex = indexOfTopLevelAncestor(host, range.startContainer, range.startOffset, children);
+  const endIndex = indexOfTopLevelAncestor(host, range.endContainer, range.endOffset, children);
+  if (startIndex < 0 || endIndex < 0) {
+    return;
+  }
+
+  const from = Math.min(startIndex, endIndex);
+  const to = Math.max(startIndex, endIndex);
+
+  // Split the affected slice into runs of consecutive inline/text nodes.
+  const runs: Node[][] = [];
+  let run: Node[] | null = null;
+  for (let i = from; i <= to && i < children.length; i++) {
+    const node = children[i];
+    if (isBlockLevelNode(node)) {
+      run = null;
+      continue;
+    }
+    if (!run) {
+      run = [];
+      runs.push(run);
+    }
+    run.push(node);
+  }
+
+  for (let r = 0; r < runs.length; r++) {
+    const nodes = runs[r];
+    if (nodes.length === 0 || !hasMeaningfulContent(nodes)) {
+      continue;
+    }
+    const paragraph = doc.createElement('p');
+    host.insertBefore(paragraph, nodes[0]);
+    for (let n = 0; n < nodes.length; n++) {
+      paragraph.appendChild(nodes[n]);
+    }
+  }
+}
+
+/** Nearest ancestor that may host a <p>: the editor root or a table cell. */
+function findParagraphHost(editorRoot: HTMLElement, node: Node | null): HTMLElement | null {
+  let current: HTMLElement | null = node && node.nodeType === Node.ELEMENT_NODE
+    ? node as HTMLElement
+    : (node ? node.parentElement : null);
+
+  while (current) {
+    if (current === editorRoot || PARAGRAPH_HOST_TAGS.test(current.tagName)) {
+      return current;
+    }
+    if (!editorRoot.contains(current)) {
+      return null;
+    }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/** Index within `children` of the host-level ancestor of a range boundary. */
+function indexOfTopLevelAncestor(
+  host: HTMLElement,
+  container: Node,
+  offset: number,
+  children: Node[],
+): number {
+  if (container === host) {
+    // Boundary expressed against the host itself: clamp into the child list.
+    if (children.length === 0) {
+      return -1;
+    }
+    return Math.max(0, Math.min(offset, children.length - 1));
+  }
+
+  let current: Node | null = container;
+  while (current && current.parentNode && current.parentNode !== host) {
+    current = current.parentNode;
+  }
+  if (!current || current.parentNode !== host) {
+    return -1;
+  }
+  for (let i = 0; i < children.length; i++) {
+    if (children[i] === current) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function hasMeaningfulContent(nodes: Node[]): boolean {
+  for (let i = 0; i < nodes.length; i++) {
+    const node = nodes[i];
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      return true;
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = (node.nodeValue || '').replace(/\u00A0/g, ' ').trim();
+      if (text.length > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isBlockLevelNode(node: Node): boolean {
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return false;
+  }
+  const tag = (node as HTMLElement).tagName;
+  return INDENTABLE_BLOCK_TAGS.test(tag) ||
+    /^(UL|OL|LI|TABLE|BLOCKQUOTE|HR|FIGURE|SECTION|ARTICLE|HEADER|FOOTER|NAV|MAIN|ASIDE|DL|FORM|FIELDSET)$/
+      .test(tag);
+}
+
 function containsBlockContent(element: HTMLElement): boolean {
-  return element.querySelector(
-    'address, article, aside, blockquote, div, dl, fieldset, figure, ' +
-    'footer, form, h1, h2, h3, h4, h5, h6, header, hr, main, nav, ' +
-    'ol, p, pre, section, table, ul',
-  ) !== null;
+  return element.querySelector(BLOCK_CONTENT_SELECTOR) !== null;
 }
 
 /**
@@ -190,6 +359,13 @@ function findSelectedBlocks(editorRoot: HTMLElement, range: Range): HTMLElement[
     }
   }
 
+  if (selected.length === 0) {
+    // Expanded selection inside a single block that the intersection test
+    // missed (e.g. a caret-sized selection at a block boundary).
+    const block = findClosestBlock(range.startContainer, editorRoot);
+    return block ? [block] : [];
+  }
+
   // An ancestor and its child both intersect the range. Only indent the
   // deepest content blocks to avoid applying the same step twice.
   const leaves: HTMLElement[] = [];
@@ -215,7 +391,7 @@ function findClosestBlock(node: Node, editorRoot: HTMLElement): HTMLElement | nu
     : node.parentElement;
 
   while (current && current !== editorRoot) {
-    if (/^(P|DIV|H1|H2|H3|H4|H5|H6|PRE)$/.test(current.tagName)) {
+    if (INDENTABLE_BLOCK_TAGS.test(current.tagName)) {
       return current;
     }
     current = current.parentElement;
@@ -224,15 +400,36 @@ function findClosestBlock(node: Node, editorRoot: HTMLElement): HTMLElement | nu
   return null;
 }
 
-function containsListItem(blocks: HTMLElement[], editorRoot: HTMLElement): boolean {
-  for (let i = 0; i < blocks.length; i++) {
-    let current: HTMLElement | null = blocks[i];
-    while (current && current !== editorRoot) {
-      if (current.tagName === 'LI') {
-        return true;
-      }
-      current = current.parentElement;
+/** True when any part of the selection sits inside a list item. */
+function rangeTouchesListItem(range: Range, editorRoot: HTMLElement): boolean {
+  if (hasListItemAncestor(range.startContainer, editorRoot) ||
+      hasListItemAncestor(range.endContainer, editorRoot)) {
+    return true;
+  }
+
+  if (range.collapsed) {
+    return false;
+  }
+
+  const listItems = editorRoot.querySelectorAll('li');
+  for (let i = 0; i < listItems.length; i++) {
+    if (rangeIntersectsNode(range, listItems[i])) {
+      return true;
     }
+  }
+  return false;
+}
+
+function hasListItemAncestor(node: Node | null, editorRoot: HTMLElement): boolean {
+  let current: HTMLElement | null = node && node.nodeType === Node.ELEMENT_NODE
+    ? node as HTMLElement
+    : (node ? node.parentElement : null);
+
+  while (current && current !== editorRoot) {
+    if (current.tagName === 'LI') {
+      return true;
+    }
+    current = current.parentElement;
   }
   return false;
 }

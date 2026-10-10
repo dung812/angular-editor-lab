@@ -25,7 +25,7 @@ export class AngularEditorService {
   /**
    * Executed command from editor header buttons exclude toggleEditorMode
    * @param command string from triggerCommand
-   * @param value optional value passed to document.execCommand
+   * @param value
    */
   executeCommand(command: string, value?: string) {
     const commands = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'pre'];
@@ -44,7 +44,7 @@ export class AngularEditorService {
    * the component to fall back to the original command behavior (for lists).
    */
   executeSafeIndentationCommand(
-    command: SafeIndentationCommand,
+    command: 'indent' | 'outdent',
     editorRoot: HTMLElement,
   ): boolean {
     return applySafeIndentation(this.doc, editorRoot, command);
@@ -142,8 +142,9 @@ export class AngularEditorService {
         // this.savedSelection.select();
         return true;
       }
+    } else {
+      return false;
     }
-    return false;
   }
 
   /**
@@ -156,7 +157,7 @@ export class AngularEditorService {
   /** check any selection is made or not */
   private checkSelection(): any {
 
-    const selectedText = this.savedSelection ? this.savedSelection.toString() : '';
+    const selectedText = this.savedSelection.toString() ;
 
     if (selectedText.length === 0) {
       throw new Error('No Selection Made');
@@ -216,10 +217,10 @@ export class AngularEditorService {
     const imageUrl = `https://img.youtube.com/vi/${id}/0.jpg`;
     const thumbnail = `
       <div style='position: relative'>
-        <img style='position: absolute; left:200px; top:140px'
-             src="https://img.icons8.com/color/96/000000/youtube-play.png"/>
         <a href='${videoUrl}' target='_blank'>
           <img src="${imageUrl}" alt="click to watch"/>
+          <img style='position: absolute; left:200px; top:140px'
+          src="https://img.icons8.com/color/96/000000/youtube-play.png"/>
         </a>
       </div>`;
     this.insertHtml(thumbnail);
@@ -255,7 +256,7 @@ export class AngularEditorService {
   getRangeSelectedNodes(range, includePartiallySelectedContainers) {
     let node = range.startContainer;
     const endNode = range.endContainer;
-    let rangeNodes: any[] = [];
+    let rangeNodes = [];
 
     // Special case for a range that is contained within a single node
     if (node === endNode) {
@@ -287,7 +288,7 @@ export class AngularEditorService {
   }
 
   getSelectedNodes() {
-    const nodes: any[] = [];
+    const nodes = [];
     if (this.doc.getSelection) {
       const sel = this.doc.getSelection();
       for (let i = 0, len = sel.rangeCount; i < len; ++i) {
