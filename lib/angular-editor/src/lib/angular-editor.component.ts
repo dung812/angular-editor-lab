@@ -114,8 +114,12 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
   @Input() urlPreviewMode = '';
   @Input() placeholder = '';
   @Input() tabIndex: number | null;
+  /** The consumer is still preparing the record (e.g. creating it); editing stays locked until it is false. */
+  @Input() busy = false;
 
   @Output() html;
+  /** Emits `true` on entering preview mode and `false` on entering edit mode. */
+  @Output() previewModeChange = new EventEmitter<boolean>();
 
   @ViewChild('editor', {static: true}) textArea!: ElementRef;
   @ViewChild('editorWrapper', {static: true}) editorWrapper!: ElementRef;
@@ -192,8 +196,12 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
 
   isContentEditable(): boolean {
     return this.config.previewMode
-      ? !this.isPreviewMode && !this.isLoadingContent
+      ? !this.isPreviewMode && !this.isContentLocked
       : this.config.editable;
+  }
+
+  get isContentLocked(): boolean {
+    return !this.isPreviewMode && (this.isLoadingContent || this.busy);
   }
 
   private refreshPreviewSource(): void {
@@ -260,6 +268,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
       this.isLoadingContent = true;
       this.rawContentRequests.next(true);
     }
+    this.previewModeChange.emit(false);
   }
 
   private enterPreviewMode(): void {
@@ -272,6 +281,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     // Consumers persist the note on a focusout without relatedTarget, so this blur doubles as the save trigger.
     this.editor.nativeElement.blur();
     this.renderPreview();
+    this.previewModeChange.emit(true);
   }
 
   private cancelRawContentLoad(): void {
@@ -294,6 +304,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     if (raw === null) {
       this.isPreviewMode = true;
       this.renderPreview();
+      this.previewModeChange.emit(true);
       this.toastrService.error('Could not load the content for editing. Please try again.');
       return;
     }
@@ -472,6 +483,8 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     } else {
       editorElement.appendChild(placeholder);
     }
+    // The upload placeholder never reaches the model, so onContentChange is not involved here.
+    this.syncPlaceholder(false);
     return placeholder;
   }
 
@@ -589,7 +602,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
    * @param value
    */
   executeCommand(command: string, value?: string) {
-    if (this.isLoadingContent && command !== 'preview') {
+    if (this.isContentLocked && command !== 'preview') {
       return;
     }
     if (this.pendingUploads > 0 && command === 'sanitize-html') {
@@ -748,9 +761,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     this.rawValue = this.toModelValue(stripEditorOnlyMarkup(html));
     if (typeof this.onChange === 'function') {
       this.onChange(this.rawValue);
-      if ((!html) !== this.showPlaceholder) {
-        this.togglePlaceholder(this.showPlaceholder);
-      }
+      this.syncPlaceholder(!html);
     }
     this.changed = true;
   }
@@ -799,9 +810,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
    */
   writeValue(value: any): void {
 
-    if ((!value || value === '<br>' || value === '') !== this.showPlaceholder) {
-      this.togglePlaceholder(this.showPlaceholder);
-    }
+    this.syncPlaceholder(!value || value === '<br>');
 
     if (value === undefined || value === '' || value === '<br>') {
       value = null;
@@ -821,6 +830,12 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     markAttachmentTokens(this.textArea.nativeElement);
 
     return;
+  }
+
+  private syncPlaceholder(isEmpty: boolean): void {
+    if (isEmpty !== this.showPlaceholder) {
+      this.togglePlaceholder(this.showPlaceholder);
+    }
   }
 
   /**

@@ -66,6 +66,8 @@
       // z-index: 1;
       color: #6c757d;
       opacity: 0.75;
+      // The overlay must not take the click, or focus lands on the host instead of the text area.
+      pointer-events: none;
     }
 
     &.show-placeholder {

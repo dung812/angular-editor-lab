@@ -19,7 +19,7 @@
     [previewMode]="config.previewMode"
     [urlPreviewMode]="urlPreviewMode"
     [isPreviewMode]="isPreviewMode"
-    [isLoadingContent]="isLoadingContent"
+    [isLoadingContent]="isContentLocked"
     [isUploading]="pendingUploads > 0"
     (execute)="executeCommand($event)">
     <ng-container
@@ -36,7 +36,7 @@
     <div
         #editor
         class="angular-editor-textarea"
-         [hidden]="isPreviewMode || isLoadingContent"
+         [hidden]="isPreviewMode || isContentLocked"
          [class.ae-compact-default-font]="useCompactDefaultFontSize()"
          [attr.contenteditable]="isContentEditable()"
          [attr.tabindex]="disabled ? -1 : tabIndex"
@@ -70,13 +70,13 @@
     >
     </div>
     <div
-        *ngIf="isLoadingContent"
+        *ngIf="isContentLocked"
         class="angular-editor-textarea ae-content-loading"
          [style.height]="config.height"
          [style.minHeight]="config.minHeight"
          [style.maxHeight]="config.maxHeight"
     >Loading content…</div>
-    <span class="angular-editor-placeholder">{{ placeholder || config['placeholder'] }}</span>
+    <span *ngIf="!isContentLocked" class="angular-editor-placeholder">{{ placeholder || config['placeholder'] }}</span>
   </div>
   <angular-editor-toolbar
     *ngIf="config.toolbarPosition === 'bottom'" #editorToolbar
