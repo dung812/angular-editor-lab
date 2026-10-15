@@ -156,7 +156,8 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     @Attribute('autofocus') private autoFocus: any,
     private http: HttpClient,
     private htmlCleanerService: HtmlCleanerService,
-    private toastrService: ToastrService
+    private toastrService: ToastrService,
+    private hostElement: ElementRef<HTMLElement>
   ) {
     const parsedTabIndex = Number(defaultTabIndex);
     this.tabIndex = (parsedTabIndex || parsedTabIndex === 0) ? parsedTabIndex : null;
@@ -185,6 +186,10 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
     if (urlChange && !urlChange.firstChange) {
       this.refreshPreviewSource();
     }
+    const busyChange = changes['busy'];
+    if (busyChange && busyChange.previousValue && !busyChange.currentValue) {
+      this.focusEditAreaWhenUnlocked();
+    }
   }
 
   ngAfterViewInit() {
@@ -202,6 +207,39 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
 
   get isContentLocked(): boolean {
     return !this.isPreviewMode && (this.isLoadingContent || this.busy);
+  }
+
+  /**
+   * The user asked to edit before the lock started, so hand them the caret
+   * once it ends, unless they have moved focus somewhere else meanwhile.
+   */
+  private focusEditAreaWhenUnlocked(): void {
+    // Wait for change detection to show the edit area again; a hidden element cannot take focus.
+    setTimeout(() => {
+      if (this.isPreviewMode || this.isContentLocked || !this.isFocusWithinEditorOrUnset()) {
+        return;
+      }
+      this.placeCaretAtEnd();
+    });
+  }
+
+  private isFocusWithinEditorOrUnset(): boolean {
+    const active: Element | null = this.doc.activeElement;
+    return !active || active === this.doc.body || this.hostElement.nativeElement.contains(active);
+  }
+
+  private placeCaretAtEnd(): void {
+    const editorElement: HTMLElement = this.textArea.nativeElement;
+    editorElement.focus();
+    const selection: Selection | null = this.doc.getSelection();
+    if (!selection) {
+      return;
+    }
+    const range: Range = this.doc.createRange();
+    range.selectNodeContents(editorElement);
+    range.collapse(false);
+    selection.removeAllRanges();
+    selection.addRange(range);
   }
 
   private refreshPreviewSource(): void {
@@ -309,6 +347,7 @@ export class AngularEditorComponent implements OnInit, OnChanges, ControlValueAc
       return;
     }
     this.applyRawValue(raw);
+    this.focusEditAreaWhenUnlocked();
   }
 
   private renderPreview(): void {
